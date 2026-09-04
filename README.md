@@ -112,7 +112,7 @@ cd machine_B_detection
 pip install -r requirements.txt
 ```
 
-## 6. Guide de démarrage — qui fait quoi, sur quelle machine
+## 6. Guide de démarrage : qui fait quoi, sur quelle machine
 
 Ordre à respecter : téléphone → machines webcam → machine de détection →
 clients. Les adresses IP ci-dessous sont celles de notre déploiement de
@@ -123,7 +123,7 @@ vérifie toujours ce qu'affiche réellement chaque terminal.
 1. Activer le partage de connexion Wi-Fi (hotspot) sur ce téléphone.
 2. Ouvrir l'application de caméra IP (ex. **IP Webcam** sur Android) et
    appuyer sur **Start server**.
-3. Noter l'adresse affichée — chez nous : `10.174.254.68:8080`.
+3. Noter l'adresse affichée - chez nous : `10.174.254.68:8080`.
 
 Ce téléphone n'a rien d'autre à faire : il reste allumé, hotspot actif,
 app ouverte. Pas besoin d'installer Python ni aucun des fichiers du projet
@@ -135,11 +135,11 @@ Se connecter au hotspot, puis :
 cd machine_A_streaming
 python webcam_stream.py
 ```
-Noter l'adresse affichée dans le terminal — chez nous :
+Noter l'adresse affichée dans le terminal - chez nous :
 `10.174.254.167:5000` (Machine A1) et `10.174.254.226:5000` (Machine A2).
 Laisser le terminal ouvert.
 
-### Machine de détection (Machine B) — une seule, à lancer en dernier
+### Machine de détection (Machine B) : une seule, à lancer en dernier
 Se connecter au hotspot, puis, sur **une seule ligne** (PowerShell
 n'accepte pas le `\` de continuation Bash) :
 ```powershell
@@ -178,10 +178,6 @@ Bouteilles). Le changement est envoyé au serveur et pris en compte
 immédiatement, sans redémarrage. Classes actuellement disponibles (toutes
 activées par défaut) : Personnes, Téléphones, Bouteilles.
 
-À noter : la classe COCO `bottle` est une bouteille générique (le modèle
-pré-entraîné ne distingue pas une bouteille d'eau d'un autre type de
-bouteille — cette granularité demanderait un modèle réentraîné sur des
-images annotées spécifiquement).
 
 Pour ajouter une autre classe COCO, il suffit d'ajouter une ligne dans le
 dictionnaire `AVAILABLE_CLASSES` en haut de `person_detection.py` (voir la
@@ -193,29 +189,3 @@ chargé indépendamment (plus simple et plus robuste que de partager un seul
 modèle entre plusieurs threads). Le tableau de bord affiche tous les flux
 côte à côte, chacun avec son propre indicateur de connexion (point vert /
 rouge) et ses propres statistiques.
-
-### Détection de chute (expérimental)
-Une case à cocher séparée ("Détection de chute") active, en plus du modèle
-de détection d'objets, un second modèle spécialisé (`yolov8n-pose.pt`) qui
-détecte le squelette des personnes. Une chute est détectée par une
-heuristique simple (boîte englobante nettement plus large que haute),
-confirmée seulement si elle persiste sur au moins 60% des 10 dernières
-images (pour éviter les fausses alertes, ex. une personne qui se penche).
-Désactivée par défaut, car elle double la charge de calcul (deux modèles
-tournent en parallèle sur chaque caméra). Quand une chute est confirmée, un
-bandeau rouge clignotant apparaît sur le panneau de la caméra concernée.
-
-## 8. Mise en réseau et dépannage
-
-Toutes les machines doivent être connectées au même point d'accès Wi-Fi
-(hotspot téléphone dans notre cas).
-
-| Problème | Cause | Solution |
-|---|---|---|
-| `ping` en échec entre deux machines alors que tout fonctionne | Windows classe les hotspots en profil réseau "Public", qui bloque par défaut les requêtes ICMP entrantes | Ignorer le ping, tester directement le flux HTTP réel ; ou repasser le réseau en "Privé" dans les paramètres Wi-Fi |
-| Flux inaccessible depuis une autre machine | Pare-feu bloquant le port (5000 ou 5001) | Accepter la popup Windows d'autorisation réseau au premier lancement, ou passer le réseau en "Privé" |
-| `Camera inconnue` (404) sur `/video_feed/<nom>` | Nom de caméra mal orthographié dans l'URL | Vérifier le nom exact utilisé dans `--camera NOM=URL` |
-| FPS bas | Normal sur CPU avec plusieurs caméras en parallèle | Réduire le nombre de classes actives, ou la résolution de capture côté Machine A |
-| Erreur `Jeton inattendu` / `MissingExpressionAfterOperator` au lancement | Commande écrite sur plusieurs lignes avec `\` (syntaxe Bash), incompatible avec PowerShell | Écrire la commande `--camera ...` entière sur une seule ligne |
-| App caméra IP affiche une erreur "pas de Wi-Fi" sur le téléphone-hotspot | Certaines apps attendent que le téléphone soit connecté en tant que client Wi-Fi, pas seulement en mode point d'accès | Généralement fonctionne quand même (le téléphone garde une IP sur son propre réseau) ; sinon, utiliser un second téléphone dédié à la caméra |
-

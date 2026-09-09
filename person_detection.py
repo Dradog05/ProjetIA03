@@ -23,6 +23,7 @@ import socket     # utilise dans get_local_ip() pour trouver l'adresse IP de la 
 import threading  # un thread independant par camera + verrous pour les donnees partagees
 import time       # mesure du temps (FPS) et pauses entre les tentatives de reconnexion
 
+import torch
 import cv2                                    # OpenCV : lecture du flux, encodage JPEG
 from flask import Flask, Response, jsonify, request  # mini-serveur web (routes HTTP, JSON)
 from ultralytics import YOLO                  # chargement et execution du modele YOLOv8
@@ -35,6 +36,18 @@ AVAILABLE_CLASSES = {
     67: "Telephones",
     39: "Bouteilles",
 }
+
+# --- Paramètres d'optimisation de performance ---
+# Exécuter YOLO toutes les N frames (1 = chaque frame, 2 = 1/2, 3 = 1/3)
+FRAME_SKIP = 2
+
+# Taille de redimensionnement pour l'inférence YOLO (défaut Ultralytics : 640)
+# 480 ou 384 offre un excellent ratio fluidité / précision
+INFERENCE_SIZE = 480
+
+# Qualité de réencodage JPEG pour le flux web (de 0 à 100, défaut OpenCV : 95)
+# 60 permet d'économiser beaucoup de CPU et de bande passante Wi-Fi
+JPEG_QUALITY = 60
 
 # Cree l'application web. Flask va gerer tout le protocole HTTP a notre
 # place ; il ne reste plus qu'a definir une fonction par URL ("route").
@@ -53,7 +66,6 @@ active_classes = {0, 67, 39}  # Personnes + Telephones + Bouteilles par defaut
 state_lock = threading.Lock()
 state = {}
 
-
 def get_local_ip():
     # Astuce : on "fait semblant" de se connecter a une adresse externe
     # (8.8.8.8) juste pour demander au systeme d'exploitation quelle
@@ -71,82 +83,110 @@ def get_local_ip():
 
 
 def detection_loop(cam_id: str, stream_url: str, model_name: str, conf_threshold: float):
-    # Un modele charge par camera/thread : plus simple et plus sur que de
-    # partager une seule instance entre plusieurs threads en parallele.
-    print(f"[{cam_id}] Chargement du modele YOLOv8...")
+    """Boucle infinie exécutée dans son propre thread pour une caméra.
+
+    Optimisations intégrées :
+    - Sélection du device PyTorch le plus rapide (CUDA > MPS > CPU)
+    - Inférence YOLO espacée de FRAME_SKIP frames avec conservation de l'image annotée native YOLO
+    - Buffer OpenCV à 1 image pour supprimer le lag
+    - Réencodage JPEG allégé
+    """
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    print(f"[{cam_id}] Modèle YOLOv8 chargé sur : {device.upper()}")
     model = YOLO(model_name)
+    model.to(device)
 
     print(f"[{cam_id}] Connexion au flux : {stream_url}")
-    # cv2.VideoCapture sait lire aussi bien une vraie webcam qu'une URL de
-    # flux MJPEG distant : le code n'a pas besoin de savoir d'ou viennent
-    # vraiment les images (webcam PC, telephone...).
     cap = cv2.VideoCapture(stream_url)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     prev_time = time.time()
+    frame_counter = 0
+
+    # Mémorisation de la dernière image annotée avec le style natif YOLO
+    last_annotated_frame = None
+    counts = {}
 
     while True:
-        # --- Cas 1 : la connexion n'a jamais ete etablie / s'est fermee ---
+        # --- Gestion de la reconnexion si le flux tombe ---
         if not cap.isOpened():
             with state_lock:
                 state[cam_id]["connecte"] = False
             cap = cv2.VideoCapture(stream_url)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             time.sleep(1)
             continue
 
-        # --- Lecture d'une image (une "frame") sur le flux ---
         ret, frame = cap.read()
         if not ret:
-            # --- Cas 2 : la connexion etait ouverte mais le flux s'est coupe ---
             print(f"[{cam_id}] Flux interrompu, tentative de reconnexion...")
             with state_lock:
                 state[cam_id]["connecte"] = False
             cap.release()
             cap = cv2.VideoCapture(stream_url)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             time.sleep(1)
             continue
 
-        # Lecture rapide de la selection actuelle de classes (definie par
-        # l'utilisateur depuis l'interface, potentiellement modifiee par
-        # un autre thread au meme moment -> d'ou le verrou).
+        frame_counter += 1
+
         with class_lock:
             class_ids = list(active_classes)
 
         if class_ids:
-            # Passe l'image dans YOLOv8, filtree sur les classes choisies.
-            results = model(frame, classes=class_ids, conf=conf_threshold, verbose=False)
-            # .plot() redessine l'image avec les boites de detection dessus.
-            annotated_frame = results[0].plot()
+            # Inférence exécutée toutes les FRAME_SKIP frames
+            if frame_counter % FRAME_SKIP == 0 or last_annotated_frame is None:
+                results = model.predict(
+                    source=frame,
+                    classes=class_ids,
+                    conf=conf_threshold,
+                    imgsz=INFERENCE_SIZE,
+                    device=device,
+                    verbose=False,
+                )
 
-            # Compte le nombre de detections par classe sur cette image.
-            counts = {}
-            for cls_tensor in results[0].boxes.cls:
-                cid = int(cls_tensor)
-                name = AVAILABLE_CLASSES.get(cid, str(cid))
-                counts[name] = counts.get(name, 0) + 1
-            # Affiche aussi les classes actives a 0 si rien detecte
-            for cid in class_ids:
-                name = AVAILABLE_CLASSES.get(cid, str(cid))
-                counts.setdefault(name, 0)
+                # Mise à jour des compteurs
+                counts = {}
+                for cls_tensor in results[0].boxes.cls:
+                    cid = int(cls_tensor)
+                    name = AVAILABLE_CLASSES.get(cid, str(cid))
+                    counts[name] = counts.get(name, 0) + 1
+                for cid in class_ids:
+                    name = AVAILABLE_CLASSES.get(cid, str(cid))
+                    counts.setdefault(name, 0)
+
+                # .plot() génère automatiquement les couleurs COCO d'origine et la précision
+                last_annotated_frame = results[0].plot()
+
+            # Utilise le rendu natif YOLO (frais ou mémorisé)
+            annotated_frame = last_annotated_frame.copy()
         else:
-            # Aucune classe selectionnee : on montre l'image brute, sans IA.
+            # Aucune classe cochée : image brute
             annotated_frame = frame.copy()
+            last_annotated_frame = None
             counts = {}
 
-        # --- Calcul du FPS (nombre d'images traitees par seconde) ---
+        # --- Mesure du FPS réel ---
         now = time.time()
         fps = 1 / (now - prev_time) if now != prev_time else 0
         prev_time = now
 
-        # --- Texte recapitulatif incruste directement sur l'image ---
+        # --- Bandeau récapitulatif supérieur ---
         overlay = f"[{cam_id}] "
         overlay += " | ".join(f"{n}: {c}" for n, c in counts.items()) if counts else "Detection desactivee"
         overlay += f" | FPS: {fps:.1f}"
         cv2.putText(annotated_frame, overlay, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # --- Publication du resultat dans l'etat partage ---
-        # Encode l'image finale en JPEG, puis met a jour `state[cam_id]`
-        # sous protection du verrou pour que le serveur web (autre thread)
-        # ne lise jamais une donnee a moitie ecrite.
-        ok, buffer = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        # --- Encodage JPEG et mise à jour de l'état partagé ---
+        ok, buffer = cv2.imencode(
+            ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+        )
         if ok:
             with state_lock:
                 state[cam_id]["frame_bytes"] = buffer.tobytes()
@@ -154,7 +194,6 @@ def detection_loop(cam_id: str, stream_url: str, model_name: str, conf_threshold
                 state[cam_id]["fps"] = round(fps, 1)
                 state[cam_id]["derniere_maj"] = time.time()
                 state[cam_id]["connecte"] = True
-
 
 def generate_mjpeg(cam_id: str):
     # Generateur MJPEG lu par un client (navigateur/tablette). Contrairement

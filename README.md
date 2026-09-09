@@ -163,7 +163,7 @@ Options disponibles :
 Rien à installer, rien à lancer. Juste se connecter au même hotspot et
 ouvrir un navigateur sur l'adresse donnée par la Machine B, par exemple :
 ```
-http://10.174.254.171:5001
+http://10.192.160.171:5001
 ```
 Le tableau de bord affiche les trois caméras côte à côte, avec les cases
 à cocher (classes à détecter, détection de chute) et les statistiques en
